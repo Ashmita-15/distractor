@@ -16,22 +16,35 @@ from pathlib import Path
 # Root of the project (parent of src/)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Data paths
-DATA_DIR = PROJECT_ROOT / "datasets"
+
+def _env_path(var_name: str, default: Path) -> Path:
+    """Resolve a path from an environment variable, falling back to default.
+
+    Enables cloud environments (Colab, Kaggle) to redirect data/output
+    locations without editing code, e.g. Kaggle mounts competition data
+    read-only under /kaggle/input/.
+    """
+    value = os.environ.get(var_name)
+    return Path(value) if value else default
+
+
+# Data paths (override with DISTRACTOR_DATA_DIR)
+DATA_DIR = _env_path("DISTRACTOR_DATA_DIR", PROJECT_ROOT / "datasets")
 TRAIN_CSV = DATA_DIR / "train.csv"
 TEST_CSV = DATA_DIR / "test.csv"
 MISCONCEPTION_CSV = DATA_DIR / "misconception_mapping.csv"
 SAMPLE_SUBMISSION_CSV = DATA_DIR / "sample_submission.csv"
 
-# Output paths
-OUTPUT_DIR = PROJECT_ROOT / "outputs"
+# Output paths (override with DISTRACTOR_OUTPUT_DIR)
+OUTPUT_DIR = _env_path("DISTRACTOR_OUTPUT_DIR", PROJECT_ROOT / "outputs")
 FIGURES_DIR = OUTPUT_DIR / "figures"
 EMBEDDINGS_DIR = OUTPUT_DIR / "embeddings"
 MODELS_DIR = OUTPUT_DIR / "models"
 RESULTS_DIR = OUTPUT_DIR / "results"
+TRIPLETS_DIR = OUTPUT_DIR / "triplets"
 
 # Create output directories
-for d in [FIGURES_DIR, EMBEDDINGS_DIR, MODELS_DIR, RESULTS_DIR]:
+for d in [FIGURES_DIR, EMBEDDINGS_DIR, MODELS_DIR, RESULTS_DIR, TRIPLETS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 

@@ -15,6 +15,7 @@ Training Pipeline:
 """
 
 import os
+import json
 import math
 import numpy as np
 from pathlib import Path
@@ -293,6 +294,60 @@ def finetune_model(
     # Save the best model (loaded at end when an evaluator is present)
     model.save(str(output_dir))
 
+    # Persist the training log (loss curve, eval accuracy per step) so the
+    # run is auditable after the fact — required for reporting.
+    log_path = output_dir / "training_log.json"
+    with open(log_path, "w") as f:
+        json.dump(trainer.state.log_history, f, indent=2)
+    print(f"  [Saved] {log_path}")
+
     print(f"\n  ✅ Training complete. Model saved to: {output_dir}")
 
     return model, output_dir
+
+
+def run_training(
+    train_triplets_file: str = "train_triplets.jsonl",
+    val_triplets_file: str = "val_triplets.jsonl",
+    output_dir: Optional[Path] = None,
+    epochs: int = FINETUNE_EPOCHS,
+    batch_size: int = FINETUNE_BATCH_SIZE,
+    max_train_triplets: Optional[int] = None,
+) -> Path:
+    """
+    Self-contained training entry point: load prepared triplets, fine-tune,
+    save the best checkpoint and training log. Performs NO preprocessing,
+    NO baseline retrieval, and NO retrieval evaluation — those live in
+    their own pipeline stages.
+
+    Args:
+        train_triplets_file: JSONL file in TRIPLETS_DIR (from 03_create_triplets).
+        val_triplets_file: JSONL validation triplets for best-checkpoint selection.
+        output_dir: Model output directory (default MODELS_DIR/finetuned_pedagogical).
+        epochs: Training epochs.
+        batch_size: Per-device batch size.
+        max_train_triplets: Optional cap on training triplets (smoke tests only).
+
+    Returns:
+        Path to the saved model directory.
+    """
+    from src.triplet_construction import load_triplets
+
+    train_triplets = load_triplets(train_triplets_file)
+    val_triplets = load_triplets(val_triplets_file)
+
+    if max_train_triplets is not None:
+        train_triplets = train_triplets[:max_train_triplets]
+        print(f"  ⚠ Smoke test: capped to {len(train_triplets)} training triplets")
+
+    if output_dir is None:
+        output_dir = MODELS_DIR / "finetuned_pedagogical"
+
+    _, model_path = finetune_model(
+        train_triplets=train_triplets,
+        val_triplets=val_triplets,
+        epochs=epochs,
+        batch_size=batch_size,
+        output_dir=Path(output_dir),
+    )
+    return model_path

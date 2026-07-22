@@ -8,7 +8,11 @@
       "Bash(echo \"exit=$?\")",
       "Bash(.venv/bin/pip install *)",
       "Bash(.venv/bin/python -c \"import datasets; print\\('datasets', datasets.__version__\\)\")",
-      "Bash(.venv/bin/python -c \"import accelerate; print\\('accelerate', accelerate.__version__\\)\")"
+      "Bash(.venv/bin/python -c \"import accelerate; print\\('accelerate', accelerate.__version__\\)\")",
+      "Bash(.venv/bin/python scripts/01_prepare_dataset.py)",
+      "Bash(.venv/bin/python scripts/04_train.py --smoke-test --output outputs/models/smoke_test)",
+      "Bash(.venv/bin/python scripts/02_baseline_retrieval.py)",
+      "Bash(.venv/bin/python scripts/05_evaluate.py --model outputs/models/smoke_test --tag smoketest)"
     ]
   }
 }

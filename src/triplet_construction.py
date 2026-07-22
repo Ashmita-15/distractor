@@ -18,12 +18,71 @@ Negative Sampling Strategies:
     3. Semi-hard mining: Requires initial embeddings (used in later epochs)
 """
 
+import json
+import zipfile
 import pandas as pd
 import numpy as np
+from pathlib import Path
 from typing import List, Tuple, Optional
 from collections import defaultdict
 
-from src.config import RANDOM_SEED
+from src.config import RANDOM_SEED, TRIPLETS_DIR
+
+
+def save_triplets(
+    triplets: List[Tuple[str, str, str]],
+    filename: str,
+    output_dir: Path = TRIPLETS_DIR,
+) -> Path:
+    """
+    Save triplets as JSONL (one {"anchor", "positive", "negative"} per line).
+
+    JSONL keeps the file human-inspectable and streams cleanly on any
+    platform, which matters for uploading to Colab/Kaggle.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / filename
+    with open(path, "w") as f:
+        for a, p, n in triplets:
+            f.write(json.dumps({"anchor": a, "positive": p, "negative": n}) + "\n")
+    print(f"  [Saved] {path} ({len(triplets):,} triplets)")
+    return path
+
+
+def load_triplets(
+    filename: str,
+    triplets_dir: Path = TRIPLETS_DIR,
+) -> List[Tuple[str, str, str]]:
+    """Load triplets saved by save_triplets."""
+    path = Path(triplets_dir) / filename
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Triplet file not found: {path}. "
+            f"Run `python scripts/03_create_triplets.py` first."
+        )
+    triplets = []
+    with open(path) as f:
+        for line in f:
+            d = json.loads(line)
+            triplets.append((d["anchor"], d["positive"], d["negative"]))
+    print(f"  [Loaded] {path} ({len(triplets):,} triplets)")
+    return triplets
+
+
+def package_triplets(
+    filenames: List[str],
+    archive_name: str = "triplets_package.zip",
+    triplets_dir: Path = TRIPLETS_DIR,
+) -> Path:
+    """
+    Zip triplet files into a single archive for upload to Colab/Kaggle.
+    """
+    archive_path = triplets_dir / archive_name
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fn in filenames:
+            zf.write(triplets_dir / fn, arcname=fn)
+    print(f"  [Saved] {archive_path}")
+    return archive_path
 
 
 def construct_triplets(

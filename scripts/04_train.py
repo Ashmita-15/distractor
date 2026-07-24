@@ -39,6 +39,8 @@ def main() -> None:
                         help="Checkpoint cadence (default: same as --eval-steps)")
     parser.add_argument("--keep-all-checkpoints", action="store_true",
                         help="Keep every checkpoint (trajectory studies, e.g. Experiment 2)")
+    parser.add_argument("--objective", choices=["triplet", "mnrl"], default="triplet",
+                        help="Training objective: 'triplet' (Exp 1-2) or 'mnrl' (Exp 3)")
     parser.add_argument("--smoke-test", action="store_true",
                         help="Debug only: train on 64 triplets for 1 epoch to verify the stage runs")
     args = parser.parse_args()
@@ -54,6 +56,7 @@ def main() -> None:
         save_steps=args.save_steps,
         save_total_limit=None if args.keep_all_checkpoints else 2,
         max_train_triplets=64 if args.smoke_test else None,
+        objective=args.objective,
     )
     print(f"\n  ✅ Stage 04 complete. Model: {model_path}")
 

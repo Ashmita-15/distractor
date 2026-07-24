@@ -41,6 +41,8 @@ def main() -> None:
                         help="Checkpoint cadence (default: same as --eval-steps)")
     parser.add_argument("--keep-all-checkpoints", action="store_true",
                         help="Keep every checkpoint (trajectory studies, e.g. Experiment 2)")
+    parser.add_argument("--objective", choices=["triplet", "mnrl"], default="triplet",
+                        help="Training objective: 'triplet' (Exp 1-2) or 'mnrl' (Exp 3)")
     args = parser.parse_args()
 
     print_section_header("GPU Training")
@@ -58,6 +60,7 @@ def main() -> None:
         eval_steps=args.eval_steps,
         save_steps=args.save_steps,
         save_total_limit=None if args.keep_all_checkpoints else 2,
+        objective=args.objective,
     )
     print(f"\n  ✅ Training complete. Model: {model_path}")
 

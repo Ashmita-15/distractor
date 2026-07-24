@@ -29,6 +29,29 @@ from collections import defaultdict
 from src.config import RANDOM_SEED, TRIPLETS_DIR
 
 
+def triplets_to_pairs(
+    triplets: List[Tuple[str, str, str]],
+) -> List[Tuple[str, str]]:
+    """
+    Convert (anchor, positive, negative) triplets to (anchor, positive) pairs
+    by discarding the negative — the data shape MultipleNegativesRankingLoss
+    consumes (it builds negatives from other positives in the batch).
+
+    Rows are NOT deduplicated: keeping every row preserves the exact
+    training-step budget of the triplet run (each unique anchor-positive pair
+    recurs once per original negative, i.e. ~3x here). This is intentional so
+    the Experiment 3 trajectory lands on the same checkpoint steps as
+    Experiments 1-2 and stays directly comparable.
+
+    Args:
+        triplets: List of (anchor, positive, negative) text tuples.
+
+    Returns:
+        List of (anchor, positive) text tuples, same length as input.
+    """
+    return [(a, p) for a, p, _ in triplets]
+
+
 def save_triplets(
     triplets: List[Tuple[str, str, str]],
     filename: str,

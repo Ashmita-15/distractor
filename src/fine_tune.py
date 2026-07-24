@@ -35,6 +35,7 @@ from sentence_transformers import (
     evaluation,
 )
 from sentence_transformers.sampler import DefaultBatchSampler
+from sentence_transformers.training_args import BatchSamplers
 
 
 class LengthGroupedTripletTrainer(SentenceTransformerTrainer):
@@ -168,9 +169,23 @@ def finetune_model(
     save_total_limit: Optional[int] = 2,
     output_dir: Optional[Path] = None,
     seed: int = RANDOM_SEED,
+    objective: str = "triplet",
 ) -> Tuple[SentenceTransformer, Path]:
     """
-    Fine-tune a SentenceTransformer using triplet loss.
+    Fine-tune a SentenceTransformer with the selected training objective.
+
+    objective (the ONLY thing that differs between experiments):
+        "triplet" (default) — TripletLoss over (anchor, positive, negative)
+            triplets with length-grouped batching. Reproduces Experiments 1-2
+            byte-for-byte.
+        "mnrl" (Experiment 3) — MultipleNegativesRankingLoss over
+            (anchor, positive) pairs (negatives drawn in-batch), with the
+            NO_DUPLICATES batch sampler (the officially recommended MNRL
+            setup). Everything else — data source, seed, LR, optimizer,
+            scheduler, epochs, checkpoint cadence, evaluator — is unchanged.
+
+    In-batch false negatives (mnrl): left unmasked, faithful to the standard
+    MNRL formulation, and documented as a limitation in the experiment report.
 
     Checkpoint cadence (Experiment 2 support):
         save_steps defaults to eval_steps and save_total_limit to 2, which
@@ -227,33 +242,51 @@ def finetune_model(
     print(f"  Device: {device}")
     model = SentenceTransformer(model_name, device=str(device))
 
-    # Triplet columns must be ordered (anchor, positive, negative) — the
-    # loss consumes dataset columns positionally.
-    train_dataset = Dataset.from_dict({
-        "anchor": [t[0] for t in train_triplets],
-        "positive": [t[1] for t in train_triplets],
-        "negative": [t[2] for t in train_triplets],
-    })
-    print(f"  Training examples: {len(train_dataset):,}")
+    if objective not in ("triplet", "mnrl"):
+        raise ValueError(f"objective must be 'triplet' or 'mnrl', got {objective!r}")
 
-    # Length keys for length-grouped batching: the collator pads each column
-    # to its own batch max, so the max token count across the three texts is
-    # the right per-triplet grouping key. Token counts are cached per unique
-    # text (anchors repeat across triplets).
-    tokenizer = model.tokenizer
-    unique_texts = list({t for trip in train_triplets for t in trip})
-    token_counts = [len(ids) for ids in tokenizer(unique_texts)["input_ids"]]
-    token_len = dict(zip(unique_texts, token_counts))
-    lengths = [max(token_len[a], token_len[p], token_len[n]) for a, p, n in train_triplets]
-    print(f"  Length-grouped batching over {len(unique_texts):,} unique texts "
-          f"(median length key: {int(np.median(lengths))} tokens)")
+    lengths = None  # only used by the triplet path (length-grouped batching)
+    if objective == "mnrl":
+        # (anchor, positive) pairs — negatives are constructed in-batch by
+        # MultipleNegativesRankingLoss. Keeping every row (no dedup) preserves
+        # the triplet run's step budget so checkpoints land on the same steps.
+        from src.triplet_construction import triplets_to_pairs
+        pairs = triplets_to_pairs(train_triplets)
+        train_dataset = Dataset.from_dict({
+            "anchor": [a for a, _ in pairs],
+            "positive": [p for _, p in pairs],
+        })
+        print(f"  Training examples: {len(train_dataset):,} (anchor, positive) pairs")
+        # scale left at the official default (20.0)
+        train_loss = losses.MultipleNegativesRankingLoss(model=model)
+    else:
+        # Triplet columns must be ordered (anchor, positive, negative) — the
+        # loss consumes dataset columns positionally.
+        train_dataset = Dataset.from_dict({
+            "anchor": [t[0] for t in train_triplets],
+            "positive": [t[1] for t in train_triplets],
+            "negative": [t[2] for t in train_triplets],
+        })
+        print(f"  Training examples: {len(train_dataset):,}")
 
-    # Configure TripletLoss
-    train_loss = losses.TripletLoss(
-        model=model,
-        distance_metric=losses.TripletDistanceMetric.COSINE,
-        triplet_margin=margin,
-    )
+        # Length keys for length-grouped batching: the collator pads each
+        # column to its own batch max, so the max token count across the three
+        # texts is the right per-triplet grouping key. Token counts are cached
+        # per unique text (anchors repeat across triplets).
+        tokenizer = model.tokenizer
+        unique_texts = list({t for trip in train_triplets for t in trip})
+        token_counts = [len(ids) for ids in tokenizer(unique_texts)["input_ids"]]
+        token_len = dict(zip(unique_texts, token_counts))
+        lengths = [max(token_len[a], token_len[p], token_len[n]) for a, p, n in train_triplets]
+        print(f"  Length-grouped batching over {len(unique_texts):,} unique texts "
+              f"(median length key: {int(np.median(lengths))} tokens)")
+
+        # Configure TripletLoss
+        train_loss = losses.TripletLoss(
+            model=model,
+            distance_metric=losses.TripletDistanceMetric.COSINE,
+            triplet_margin=margin,
+        )
 
     # Create evaluator
     evaluator = None
@@ -265,13 +298,26 @@ def finetune_model(
 
     total_steps = math.ceil(len(train_dataset) / batch_size) * epochs
 
+    # MNRL draws negatives in-batch, so batch composition matters: NO_DUPLICATES
+    # is the officially recommended sampler (avoids a pair's duplicate landing
+    # in the same batch as a self-false-negative). The triplet path ignores
+    # this — its LengthGroupedTripletTrainer overrides the sampler — so this
+    # setting is inert there and does not change Experiments 1-2.
+    batch_sampler = (
+        BatchSamplers.NO_DUPLICATES if objective == "mnrl"
+        else BatchSamplers.BATCH_SAMPLER
+    )
+
     print(f"\n  === Training Configuration ===")
+    print(f"  Objective:     {objective}")
     print(f"  Epochs:        {epochs}")
     print(f"  Batch size:    {batch_size}")
     print(f"  Learning rate: {learning_rate}")
     print(f"  Warmup ratio:  {warmup_ratio}")
-    print(f"  Total steps:   {total_steps}")
-    print(f"  Margin:        {margin}")
+    print(f"  Total steps:   ~{total_steps}" + (" (NO_DUPLICATES may drop a few)" if objective == "mnrl" else ""))
+    if objective == "triplet":
+        print(f"  Margin:        {margin}")
+    print(f"  Batch sampler: {batch_sampler}")
     print(f"  Eval steps:    {eval_steps}")
     print(f"  Output:        {output_dir}")
     print(f"\n  Starting training...\n")
@@ -284,6 +330,7 @@ def finetune_model(
         per_device_eval_batch_size=batch_size,
         learning_rate=learning_rate,
         warmup_ratio=warmup_ratio,
+        batch_sampler=batch_sampler,
         eval_strategy="steps" if evaluator else "no",
         eval_steps=eval_steps,
         save_strategy="steps" if evaluator else "no",
@@ -298,14 +345,26 @@ def finetune_model(
         report_to="none",
     )
 
-    trainer = LengthGroupedTripletTrainer(
-        model=model,
-        args=args,
-        train_dataset=train_dataset,
-        loss=train_loss,
-        evaluator=evaluator,
-        lengths=lengths,
-    )
+    if objective == "mnrl":
+        # Standard trainer; batch sampling is governed by args.batch_sampler
+        # (NO_DUPLICATES). No length grouping — batch composition is the
+        # negative sampling and must follow the recommended MNRL setup.
+        trainer = SentenceTransformerTrainer(
+            model=model,
+            args=args,
+            train_dataset=train_dataset,
+            loss=train_loss,
+            evaluator=evaluator,
+        )
+    else:
+        trainer = LengthGroupedTripletTrainer(
+            model=model,
+            args=args,
+            train_dataset=train_dataset,
+            loss=train_loss,
+            evaluator=evaluator,
+            lengths=lengths,
+        )
     trainer.train()
 
     # Save the best model (loaded at end when an evaluator is present)
@@ -333,6 +392,7 @@ def run_training(
     save_steps: Optional[int] = None,
     save_total_limit: Optional[int] = 2,
     max_train_triplets: Optional[int] = None,
+    objective: str = "triplet",
 ) -> Path:
     """
     Self-contained training entry point: load prepared triplets, fine-tune,
@@ -347,6 +407,9 @@ def run_training(
         epochs: Training epochs.
         batch_size: Per-device batch size.
         max_train_triplets: Optional cap on training triplets (smoke tests only).
+        objective: "triplet" (Exp 1-2) or "mnrl" (Exp 3). See finetune_model.
+            The same train_triplets file is used either way; for "mnrl" the
+            negatives are discarded to form (anchor, positive) pairs.
 
     Returns:
         Path to the saved model directory.
@@ -372,5 +435,6 @@ def run_training(
         save_steps=save_steps,
         save_total_limit=save_total_limit,
         output_dir=Path(output_dir),
+        objective=objective,
     )
     return model_path

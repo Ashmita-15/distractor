@@ -161,10 +161,24 @@ def baseline_triplet_accuracy() -> float:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Experiment 2: evaluate all checkpoints")
+    parser = argparse.ArgumentParser(description="Evaluate all checkpoints on retrieval")
     parser.add_argument("--model-dir", type=Path,
                         default=MODELS_DIR / "finetuned_pedagogical")
+    parser.add_argument("--experiment-name", type=str, default="Experiment 2",
+                        help="Name used in report title/prose")
+    parser.add_argument("--skip-identity-check", action="store_true",
+                        help="Skip the loss-identity check vs Experiment 1. Use for "
+                             "Experiment 3+, where the objective changed by design so "
+                             "the training loss is deliberately not comparable.")
+    parser.add_argument("--compare-val-csv", type=Path, default=None,
+                        help="Optional prior-experiment checkpoint_metrics_val.csv "
+                             "(e.g. Experiment 2) to compare the retrieval trajectory against.")
+    parser.add_argument("--fig-dir-name", type=str, default="exp2_trajectory",
+                        help="Subdirectory under outputs/figures/ for the trajectory plots.")
     args = parser.parse_args()
+
+    global FIG_DIR
+    FIG_DIR = FIGURES_DIR / args.fig_dir_name
 
     set_seed()
     setup_matplotlib()
@@ -172,7 +186,7 @@ def main() -> None:
     TRAJ_EMBEDDINGS.mkdir(parents=True, exist_ok=True)
     FIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    print_section_header("EXPERIMENT 2: Checkpoint Trajectory Evaluation")
+    print_section_header(f"{args.experiment_name.upper()}: Checkpoint Trajectory Evaluation")
 
     checkpoints = discover_checkpoints(args.model_dir)
     if not checkpoints:
@@ -182,8 +196,20 @@ def main() -> None:
           f"{[s for s, _ in checkpoints]}")
 
     # ---- Task 6: identity check (before spending any compute) ----
-    print("\nTrajectory identity check...")
-    identity = trajectory_identity_check(args.model_dir)
+    if args.skip_identity_check:
+        identity = {
+            "status": "NOT APPLICABLE",
+            "details": [
+                "Training objective changed by design, so the training-loss "
+                "trajectory is deliberately NOT comparable to Experiment 1.",
+                "Controlled factors held fixed by construction: seed, dataset, "
+                "split, source triplets, checkpoint cadence (every 50 steps).",
+            ],
+        }
+        print("\n  Identity check skipped (objective changed by design).")
+    else:
+        print("\nTrajectory identity check...")
+        identity = trajectory_identity_check(args.model_dir)
 
     # ---- Baseline reference (validation queries) ----
     print_section_header("Baseline reference on VALIDATION queries")
@@ -269,6 +295,12 @@ def main() -> None:
     print(f"\n  [Saved] {final_csv}")
     print(final_df.to_string(index=False))
 
+    # ---- Optional prior-experiment trajectory for comparison overlay ----
+    compare_df = None
+    if args.compare_val_csv and args.compare_val_csv.exists():
+        compare_df = pd.read_csv(args.compare_val_csv)
+        print(f"\n  Loaded comparison trajectory: {args.compare_val_csv}")
+
     # ---- Task 5: figures ----
     steps = df["training_step"].values
     base_mask = steps == 0
@@ -282,15 +314,20 @@ def main() -> None:
     for col, title, fname in plots:
         fig, ax = plt.subplots(figsize=(8, 4.5))
         vals = df[col].astype(float).values
+        # Prior-experiment overlay (same column, if present)
+        if compare_df is not None and col in compare_df.columns:
+            c = compare_df[compare_df["training_step"] > 0]
+            ax.plot(c["training_step"], c[col].astype(float), "s--", color="#f59e0b",
+                    alpha=0.7, label="prior experiment (comparison)")
         ax.plot(steps[~base_mask], vals[~base_mask], "o-", color="#2563eb",
-                label="fine-tuning trajectory")
+                label=f"{args.experiment_name} trajectory")
         ax.axhline(vals[base_mask][0], color="#0f172a", ls="--", lw=1.2,
                    label=f"baseline (pretrained) = {vals[base_mask][0]:.4f}")
         ax.axvline(best_step, color="#16a34a", ls=":", lw=1.2,
                    label=f"selected checkpoint (step {best_step})")
         ax.set_xlabel("training step")
         ax.set_ylabel(title)
-        ax.set_title(f"{title} vs training step")
+        ax.set_title(f"{title} vs training step — {args.experiment_name}")
         ax.legend(fontsize=8)
         fig.tight_layout()
         fig.savefig(FIG_DIR / f"{fname}.png", dpi=200, bbox_inches="tight")
@@ -298,8 +335,9 @@ def main() -> None:
     print(f"\n  [Saved] 5 figures to {FIG_DIR}")
 
     # ---- Task 7: report ----
-    write_report(df, identity, best_step, base_test, sel_test, final_df)
-    print(f"\n  ✅ Experiment 2 evaluation complete.")
+    write_report(df, identity, best_step, base_test, sel_test, final_df,
+                 experiment_name=args.experiment_name, compare_df=compare_df)
+    print(f"\n  ✅ {args.experiment_name} evaluation complete.")
 
 
 def _df_to_md(frame: pd.DataFrame) -> str:
@@ -310,7 +348,8 @@ def _df_to_md(frame: pd.DataFrame) -> str:
         return "```\n" + frame.to_string(index=False) + "\n```"
 
 
-def write_report(df, identity, best_step, base_test, sel_test, final_df) -> None:
+def write_report(df, identity, best_step, base_test, sel_test, final_df,
+                 experiment_name: str = "Experiment 2", compare_df=None) -> None:
     """Auto-generate the trajectory report answering the 7 questions."""
     ck = df[df["training_step"] > 0].reset_index(drop=True)
     base = df[df["training_step"] == 0].iloc[0]
@@ -332,42 +371,59 @@ def write_report(df, identity, best_step, base_test, sel_test, final_df) -> None
     sel_beats_baseline_test = sel_test["mrr@10"] > base_test["mrr@10"]
 
     if not beats_baseline_val:
-        exp3 = (
+        next_exp = (
             "No checkpoint beats the pretrained baseline on validation retrieval, "
-            "so checkpoint selection cannot rescue this training setup: the "
-            "objective itself is the binding constraint. **Experiment 3 should "
-            "change exactly one thing: the negative-sampling/loss structure** — "
-            "replace random in-subject triplets with MultipleNegativesRankingLoss "
-            "(in-batch negatives) or hard-negative mining, keeping data, splits, "
-            "model, and schedule fixed."
+            "so this single-factor change was not sufficient. **The next experiment "
+            "should change one different factor**, targeting the most-implicated "
+            "remaining causes: (a) full-parameter fine-tuning destroying pretrained "
+            "structure — test by freezing the encoder and training only a projection "
+            "head (or LoRA); (b) supervision sparsity in the long tail. Keep data, "
+            "split, model, and schedule fixed."
         )
     elif sel_beats_baseline_test:
-        exp3 = (
+        next_exp = (
             "Validation-selected fine-tuning beats the baseline on the held-out "
-            "test set, so the framework works once model selection targets "
-            "retrieval. **Experiment 3 should hold everything fixed and change "
+            "test set. **The next experiment should hold everything fixed and change "
             "only negative hardness** (mined hard negatives) to push the "
             "top-of-ranking margin further."
         )
     else:
-        exp3 = (
+        next_exp = (
             "A checkpoint beats baseline on validation but not on test — "
             "consistent with selection overfitting to the small validation set. "
-            "**Experiment 3 should quantify selection variance** (e.g., repeated "
-            "selection over bootstrap resamples of validation queries) before "
-            "any architectural change."
+            "**The next experiment should quantify selection variance** (e.g., "
+            "repeated selection over bootstrap resamples of validation queries) "
+            "before any architectural change."
         )
 
+    # Optional comparison against a prior experiment's trajectory
+    compare_lines = []
+    if compare_df is not None:
+        pc = compare_df[compare_df["training_step"] > 0]
+        prior_best = pc["MRR@10"].max()
+        prior_best_step = int(pc.loc[pc["MRR@10"].idxmax(), "training_step"])
+        verdict = ("higher" if retr_peak > prior_best
+                   else "lower" if retr_peak < prior_best else "equal")
+        compare_lines = [
+            "## Trajectory comparison vs prior experiment",
+            f"Best val MRR@10 — this experiment: **{retr_peak:.4f}** (step {retr_peak_step}); "
+            f"prior experiment: **{prior_best:.4f}** (step {prior_best_step}). "
+            f"This experiment's best checkpoint is **{verdict}** than the prior experiment's, "
+            f"and baseline is {base['MRR@10']:.4f}.",
+            "",
+        ]
+
     lines = [
-        "# Experiment 2 — Checkpoint Trajectory Report",
+        f"# {experiment_name} — Checkpoint Trajectory Report",
         "",
         f"Selection criterion: validation {SELECTION_METRIC} "
         f"(tie-break {SELECTION_TIEBREAK}). Test split touched exactly once.",
         "",
-        "## Trajectory identity vs Experiment 1 (Task 6)",
+        "## Trajectory identity / controlled-factor check",
         f"**Status: {identity['status']}**",
         *[f"- {d}" for d in identity["details"]],
         "",
+        *compare_lines,
         "## Q1 — Does retrieval improve during early training?",
         f"{'**Yes**' if q1_improves else '**No**'}: within the first 200 steps, "
         f"best val MRR@10 = {early['MRR@10'].max():.4f} vs baseline "
@@ -404,8 +460,8 @@ def write_report(df, identity, best_step, base_test, sel_test, final_df) -> None
         f"the baseline on test MRR@10 "
         f"({sel_test['mrr@10']:.4f} vs {base_test['mrr@10']:.4f}).",
         "",
-        "## Q7 — What should Experiment 3 investigate?",
-        exp3,
+        "## Q7 — What should the next experiment investigate?",
+        next_exp,
         "",
         "---",
         "*Auto-generated by scripts/06_evaluate_checkpoints.py; every number "

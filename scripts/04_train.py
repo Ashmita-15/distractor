@@ -23,7 +23,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import FINETUNE_EPOCHS, FINETUNE_BATCH_SIZE, MODELS_DIR
+from src.config import FINETUNE_EPOCHS, FINETUNE_BATCH_SIZE, EVAL_STEPS, MODELS_DIR
 from src.utils import set_seed, print_section_header
 from src.fine_tune import run_training
 
@@ -33,6 +33,12 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=FINETUNE_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=FINETUNE_BATCH_SIZE)
     parser.add_argument("--output", type=Path, default=MODELS_DIR / "finetuned_pedagogical")
+    parser.add_argument("--eval-steps", type=int, default=EVAL_STEPS,
+                        help="Triplet-evaluator cadence (default: %(default)s)")
+    parser.add_argument("--save-steps", type=int, default=None,
+                        help="Checkpoint cadence (default: same as --eval-steps)")
+    parser.add_argument("--keep-all-checkpoints", action="store_true",
+                        help="Keep every checkpoint (trajectory studies, e.g. Experiment 2)")
     parser.add_argument("--smoke-test", action="store_true",
                         help="Debug only: train on 64 triplets for 1 epoch to verify the stage runs")
     args = parser.parse_args()
@@ -44,6 +50,9 @@ def main() -> None:
         output_dir=args.output,
         epochs=1 if args.smoke_test else args.epochs,
         batch_size=args.batch_size,
+        eval_steps=args.eval_steps,
+        save_steps=args.save_steps,
+        save_total_limit=None if args.keep_all_checkpoints else 2,
         max_train_triplets=64 if args.smoke_test else None,
     )
     print(f"\n  ✅ Stage 04 complete. Model: {model_path}")

@@ -17,16 +17,25 @@ from pathlib import Path
 from typing import Tuple, Optional, List
 from sentence_transformers import SentenceTransformer
 
-# On macOS, faiss-cpu and torch each bundle their own OpenMP runtime; once
-# torch has run compute, any faiss search segfaults (observed empirically —
-# neither import ordering, faiss.omp_set_num_threads(1), nor
-# KMP_DUPLICATE_LIB_OK avoids it). Exact inner-product search over a corpus
-# of ~4K vectors is trivial in NumPy and numerically identical to
-# faiss.IndexFlatIP, so we default to the NumPy backend on macOS and keep
-# FAISS for platforms where the runtimes coexist.
-USE_FAISS_DEFAULT = sys.platform != "darwin"
-if USE_FAISS_DEFAULT:
-    import faiss
+# Backend selection for exact inner-product search. The NumPy backend
+# (ExactInnerProductIndex, below) is numerically identical to
+# faiss.IndexFlatIP for a corpus of ~4K vectors, so it is always a safe
+# fallback. FAISS is used only when it is both safe and available:
+#   - macOS: never — faiss-cpu and torch bundle conflicting OpenMP runtimes,
+#     and any faiss search segfaults once torch has run compute (observed
+#     empirically; not fixable via import order, omp_set_num_threads, or
+#     KMP_DUPLICATE_LIB_OK).
+#   - Linux (e.g. Colab): use FAISS if importable, else fall back to NumPy.
+#     Colab has no faiss preinstalled, so the fallback keeps the retrieval
+#     evaluation runnable without adding a heavy dependency.
+if sys.platform == "darwin":
+    USE_FAISS_DEFAULT = False
+else:
+    try:
+        import faiss
+        USE_FAISS_DEFAULT = True
+    except ImportError:
+        USE_FAISS_DEFAULT = False
 
 
 class ExactInnerProductIndex:

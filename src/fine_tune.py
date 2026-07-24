@@ -164,11 +164,23 @@ def finetune_model(
     warmup_ratio: float = FINETUNE_WARMUP_RATIO,
     margin: float = TRIPLET_MARGIN,
     eval_steps: int = EVAL_STEPS,
+    save_steps: Optional[int] = None,
+    save_total_limit: Optional[int] = 2,
     output_dir: Optional[Path] = None,
     seed: int = RANDOM_SEED,
 ) -> Tuple[SentenceTransformer, Path]:
     """
     Fine-tune a SentenceTransformer using triplet loss.
+
+    Checkpoint cadence (Experiment 2 support):
+        save_steps defaults to eval_steps and save_total_limit to 2, which
+        reproduces the Experiment 1 configuration exactly. For trajectory
+        studies pass save_steps=50, eval_steps=50, save_total_limit=None
+        (keep all checkpoints). Note the HF Trainer requires save_steps to
+        be a round multiple of eval_steps when load_best_model_at_end=True.
+        Saving/evaluating more often does not alter the training trajectory:
+        evaluation runs in eval mode under no_grad and the data order comes
+        from an isolated torch.Generator.
 
     Args:
         train_triplets: Training triplets.
@@ -180,6 +192,8 @@ def finetune_model(
         warmup_ratio: Fraction of steps for linear warmup.
         margin: Triplet loss margin.
         eval_steps: Evaluate every N steps.
+        save_steps: Save a checkpoint every N steps (default: eval_steps).
+        save_total_limit: Max checkpoints kept (None = keep all).
         output_dir: Directory to save the fine-tuned model.
         seed: Random seed.
 
@@ -246,6 +260,9 @@ def finetune_model(
     if val_triplets and len(val_triplets) > 0:
         evaluator = create_evaluator(val_triplets)
 
+    if save_steps is None:
+        save_steps = eval_steps
+
     total_steps = math.ceil(len(train_dataset) / batch_size) * epochs
 
     print(f"\n  === Training Configuration ===")
@@ -270,8 +287,8 @@ def finetune_model(
         eval_strategy="steps" if evaluator else "no",
         eval_steps=eval_steps,
         save_strategy="steps" if evaluator else "no",
-        save_steps=eval_steps,
-        save_total_limit=2,
+        save_steps=save_steps,
+        save_total_limit=save_total_limit,
         load_best_model_at_end=bool(evaluator),
         metric_for_best_model="eval_val_cosine_accuracy",
         greater_is_better=True,
@@ -312,6 +329,9 @@ def run_training(
     output_dir: Optional[Path] = None,
     epochs: int = FINETUNE_EPOCHS,
     batch_size: int = FINETUNE_BATCH_SIZE,
+    eval_steps: int = EVAL_STEPS,
+    save_steps: Optional[int] = None,
+    save_total_limit: Optional[int] = 2,
     max_train_triplets: Optional[int] = None,
 ) -> Path:
     """
@@ -348,6 +368,9 @@ def run_training(
         val_triplets=val_triplets,
         epochs=epochs,
         batch_size=batch_size,
+        eval_steps=eval_steps,
+        save_steps=save_steps,
+        save_total_limit=save_total_limit,
         output_dir=Path(output_dir),
     )
     return model_path

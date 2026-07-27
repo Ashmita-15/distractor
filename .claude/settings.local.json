@@ -12,7 +12,10 @@
       "Bash(.venv/bin/python scripts/01_prepare_dataset.py)",
       "Bash(.venv/bin/python scripts/04_train.py --smoke-test --output outputs/models/smoke_test)",
       "Bash(.venv/bin/python scripts/02_baseline_retrieval.py)",
-      "Bash(.venv/bin/python scripts/05_evaluate.py --model outputs/models/smoke_test --tag smoketest)"
+      "Bash(.venv/bin/python scripts/05_evaluate.py --model outputs/models/smoke_test --tag smoketest)",
+      "Bash(.venv/bin/python -m py_compile scripts/06_evaluate_checkpoints.py scripts/04_train.py scripts/train_gpu.py src/fine_tune.py)",
+      "Bash(.venv/bin/python -c \"import json; nb=json.load\\(open\\('train_on_colab.ipynb'\\)\\); print\\('notebook valid,', len\\(nb['cells']\\), 'cells'\\)\")",
+      "Bash(/Users/ashmita/Downloads/distractor/.venv/bin/python -)"
     ]
   }
 }

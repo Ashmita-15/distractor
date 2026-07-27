@@ -25,7 +25,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 
-from src.config import FINETUNE_EPOCHS, FINETUNE_BATCH_SIZE, EVAL_STEPS, MODELS_DIR
+from src.config import (
+    FINETUNE_EPOCHS, FINETUNE_BATCH_SIZE, EVAL_STEPS, MODELS_DIR, RANDOM_SEED,
+)
 from src.utils import set_seed, print_section_header
 from src.fine_tune import run_training
 
@@ -43,6 +45,9 @@ def main() -> None:
                         help="Keep every checkpoint (trajectory studies, e.g. Experiment 2)")
     parser.add_argument("--objective", choices=["triplet", "mnrl"], default="triplet",
                         help="Training objective: 'triplet' (Exp 1-2) or 'mnrl' (Exp 3)")
+    parser.add_argument("--seed", type=int, default=RANDOM_SEED,
+                        help="Random seed for training stochasticity (data order, "
+                             "dropout). Default %(default)s reproduces Experiments 1-3.")
     args = parser.parse_args()
 
     print_section_header("GPU Training")
@@ -52,7 +57,7 @@ def main() -> None:
         print("  ⚠ No CUDA GPU detected — training will run on CPU and be slow.")
         print("    On Colab: Runtime > Change runtime type > GPU.")
 
-    set_seed()
+    set_seed(args.seed)
     model_path = run_training(
         output_dir=args.output,
         epochs=args.epochs,
@@ -61,6 +66,7 @@ def main() -> None:
         save_steps=args.save_steps,
         save_total_limit=None if args.keep_all_checkpoints else 2,
         objective=args.objective,
+        seed=args.seed,
     )
     print(f"\n  ✅ Training complete. Model: {model_path}")
 

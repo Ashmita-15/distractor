@@ -23,7 +23,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import FINETUNE_EPOCHS, FINETUNE_BATCH_SIZE, EVAL_STEPS, MODELS_DIR
+from src.config import (
+    FINETUNE_EPOCHS, FINETUNE_BATCH_SIZE, EVAL_STEPS, MODELS_DIR, RANDOM_SEED,
+)
 from src.utils import set_seed, print_section_header
 from src.fine_tune import run_training
 
@@ -41,11 +43,13 @@ def main() -> None:
                         help="Keep every checkpoint (trajectory studies, e.g. Experiment 2)")
     parser.add_argument("--objective", choices=["triplet", "mnrl"], default="triplet",
                         help="Training objective: 'triplet' (Exp 1-2) or 'mnrl' (Exp 3)")
+    parser.add_argument("--seed", type=int, default=RANDOM_SEED,
+                        help="Random seed (default %(default)s reproduces Experiments 1-3)")
     parser.add_argument("--smoke-test", action="store_true",
                         help="Debug only: train on 64 triplets for 1 epoch to verify the stage runs")
     args = parser.parse_args()
 
-    set_seed()
+    set_seed(args.seed)
     print_section_header("STAGE 04: Fine-tuning")
 
     model_path = run_training(
@@ -57,6 +61,7 @@ def main() -> None:
         save_total_limit=None if args.keep_all_checkpoints else 2,
         max_train_triplets=64 if args.smoke_test else None,
         objective=args.objective,
+        seed=args.seed,
     )
     print(f"\n  ✅ Stage 04 complete. Model: {model_path}")
 

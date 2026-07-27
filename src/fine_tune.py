@@ -393,6 +393,7 @@ def run_training(
     save_total_limit: Optional[int] = 2,
     max_train_triplets: Optional[int] = None,
     objective: str = "triplet",
+    seed: int = RANDOM_SEED,
 ) -> Path:
     """
     Self-contained training entry point: load prepared triplets, fine-tune,
@@ -410,6 +411,9 @@ def run_training(
         objective: "triplet" (Exp 1-2) or "mnrl" (Exp 3). See finetune_model.
             The same train_triplets file is used either way; for "mnrl" the
             negatives are discarded to form (anchor, positive) pairs.
+        seed: Random seed. Controls training stochasticity only (batch order,
+            dropout); the encoder init, triplet file, and splits are fixed, so
+            varying this isolates run-to-run variance for replication studies.
 
     Returns:
         Path to the saved model directory.
@@ -436,5 +440,6 @@ def run_training(
         save_total_limit=save_total_limit,
         output_dir=Path(output_dir),
         objective=objective,
+        seed=seed,
     )
     return model_path

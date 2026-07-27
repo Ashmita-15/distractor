@@ -34,8 +34,51 @@ from sentence_transformers import (
     losses,
     evaluation,
 )
-from sentence_transformers.sampler import DefaultBatchSampler
+from sentence_transformers.sampler import DefaultBatchSampler, NoDuplicatesBatchSampler
 from sentence_transformers.training_args import BatchSamplers
+
+
+class SeededNoDuplicatesTrainer(SentenceTransformerTrainer):
+    """
+    SentenceTransformerTrainer that propagates the run seed into the
+    NO_DUPLICATES batch sampler (used by the MNRL objective).
+
+    Why this is required:
+        sentence-transformers >= 5.4 re-seeds the sampler's generator inside
+        NoDuplicatesBatchSampler.__iter__ with `self.seed + self.epoch`, and
+        the trainer never forwards `args.seed`, so `self.seed` stays at its
+        default of 0. The generator that get_train_dataloader seeded from
+        args.seed is therefore discarded, and batch composition becomes
+        IDENTICAL for every run regardless of the seed. For an in-batch
+        negative loss the batch *is* the negative sampling, so without this
+        override the seed would not actually vary the experiment.
+
+        (On sentence-transformers 3.3.1 the guard is `and self.seed:`, so a
+        default of 0 is falsy and the reseed is skipped — the bug only
+        manifests on >= 5.4. Passing seed=args.seed gives correct, seed-
+        dependent, deterministic batch order on both.)
+
+    Note: seeds must be non-zero for the reseed branch to be exercised
+    consistently across library versions; the study uses 7/17/42/123/2025.
+    """
+
+    def get_batch_sampler(
+        self,
+        dataset,
+        batch_size: int,
+        drop_last: bool,
+        valid_label_columns=None,
+        generator=None,
+        **kwargs,
+    ):
+        return NoDuplicatesBatchSampler(
+            dataset=dataset,
+            batch_size=batch_size,
+            drop_last=drop_last,
+            valid_label_columns=valid_label_columns or [],
+            generator=generator,
+            seed=self.args.seed,
+        )
 
 
 class LengthGroupedTripletTrainer(SentenceTransformerTrainer):
@@ -346,10 +389,11 @@ def finetune_model(
     )
 
     if objective == "mnrl":
-        # Standard trainer; batch sampling is governed by args.batch_sampler
-        # (NO_DUPLICATES). No length grouping — batch composition is the
-        # negative sampling and must follow the recommended MNRL setup.
-        trainer = SentenceTransformerTrainer(
+        # NO_DUPLICATES batch sampling (the recommended MNRL setup), with the
+        # run seed propagated into the sampler — see SeededNoDuplicatesTrainer.
+        # No length grouping: batch composition is the negative sampling and
+        # must follow the recommended MNRL setup.
+        trainer = SeededNoDuplicatesTrainer(
             model=model,
             args=args,
             train_dataset=train_dataset,

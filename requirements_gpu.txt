@@ -17,3 +17,9 @@ scikit-learn        # Stage 01 split (train_test_split)
 # backend that is numerically identical to faiss.IndexFlatIP at this scale.
 matplotlib
 tabulate
+# Stage 2 generation: local instruction-tuned LLM with 4-bit quantisation.
+# transformers is already pulled in by sentence-transformers, pinned here for
+# clarity; bitsandbytes provides the 4-bit kernels needed to fit a 7B model
+# on a 16 GB T4.
+transformers>=4.44
+bitsandbytes

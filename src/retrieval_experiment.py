@@ -98,6 +98,9 @@ def run_retrieval_evaluation(
     embeddings_dir: Path = EMBEDDINGS_DIR,
     k_values=TOP_K_VALUES,
     max_k: int = MAX_K,
+    query_template: Optional[str] = None,
+    corpus_template: Optional[str] = None,
+    corpus_embeddings: Optional[np.ndarray] = None,
 ) -> Dict:
     """
     Run the complete retrieval evaluation for one embedding model.
@@ -117,16 +120,47 @@ def run_retrieval_evaluation(
         embeddings_dir: Where embeddings are written.
         k_values: K values for metric computation.
         max_k: Number of neighbors to retrieve.
+        query_template: Optional override for the QUERY text representation
+            (query-representation ablation). None = use the prepared 'text'
+            column, i.e. the canonical representation used by all prior
+            experiments.
+        corpus_template: Optional override for the CORPUS text representation.
+            None = use the prepared 'text' column. Deployment-faithful
+            ablations leave this as None, since historical corpus items do
+            have known distractors.
+        corpus_embeddings: Optional precomputed corpus embeddings. Supplying
+            these guarantees byte-identical corpus representation across
+            several query variants (and avoids redundant encoding). Must
+            correspond to the corpus produced by load_corpus_and_queries.
 
     Returns:
         Dict with keys: metrics, stratified, indices, corpus_df, query_df.
     """
+    from src.data_loader import create_text_representation
+
     corpus_df, query_df, queries_in_corpus = load_corpus_and_queries(query_split)
     print(f"  Corpus size: {len(corpus_df):,} QDPs")
     print(f"  Query size:  {len(query_df):,} QDPs (split: {query_split})")
 
-    print("\nEncoding corpus...")
-    corpus_emb = encode_texts(corpus_df["text"].tolist(), model_name_or_path=str(model_name_or_path))
+    if corpus_template is not None:
+        corpus_df = create_text_representation(corpus_df, template=corpus_template)
+        print(f"  Corpus template overridden: {corpus_template!r}")
+    if query_template is not None:
+        query_df = create_text_representation(query_df, template=query_template)
+        print(f"  Query template overridden:  {query_template!r}")
+        print(f"  Example query: {query_df['text'].iloc[0][:160]!r}")
+
+    if corpus_embeddings is not None:
+        if len(corpus_embeddings) != len(corpus_df):
+            raise ValueError(
+                f"corpus_embeddings has {len(corpus_embeddings)} rows but corpus "
+                f"has {len(corpus_df)}; they must correspond."
+            )
+        print("\nReusing precomputed corpus embeddings (identical across variants).")
+        corpus_emb = corpus_embeddings
+    else:
+        print("\nEncoding corpus...")
+        corpus_emb = encode_texts(corpus_df["text"].tolist(), model_name_or_path=str(model_name_or_path))
     save_embeddings(corpus_emb, f"{tag}_corpus_embeddings.npy", embeddings_dir)
 
     print("\nEncoding queries...")

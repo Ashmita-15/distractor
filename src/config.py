@@ -101,12 +101,32 @@ TEST_RATIO = 0.1
 # Text Representation Template
 # =============================================================================
 
-# Template for constructing the text representation of a question-distractor pair
+# Template for constructing the text representation of a question-distractor pair.
+# This is the canonical representation used for training and for the corpus in
+# every experiment; it is unchanged.
 QDP_TEXT_TEMPLATE = (
     "Subject: {subject} | Construct: {construct} | "
     "Question: {question} | Correct Answer: {correct_answer} | "
     "Distractor: {distractor}"
 )
+
+# Named query-representation variants for the query-representation ablation.
+# Only the QUERY side varies; the corpus keeps QDP_TEXT_TEMPLATE ("full"),
+# mirroring deployment, where historical corpus items have known distractors
+# but an incoming question does not.
+#   full            - current system (reference condition)
+#   no_distractor   - metadata retained, distractor removed
+#   question_answer - deployment-faithful: no metadata, no distractor
+QDP_TEXT_TEMPLATES = {
+    "full": QDP_TEXT_TEMPLATE,
+    "no_distractor": (
+        "Subject: {subject} | Construct: {construct} | "
+        "Question: {question} | Correct Answer: {correct_answer}"
+    ),
+    "question_answer": (
+        "Question: {question} | Correct Answer: {correct_answer}"
+    ),
+}
 
 
 # =============================================================================

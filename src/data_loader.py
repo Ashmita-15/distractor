@@ -203,7 +203,10 @@ def melt_to_qdp(
     return qdp_df
 
 
-def create_text_representation(qdp_df: pd.DataFrame) -> pd.DataFrame:
+def create_text_representation(
+    qdp_df: pd.DataFrame,
+    template: str = QDP_TEXT_TEMPLATE,
+) -> pd.DataFrame:
     """
     Create the text representation for each QDP.
 
@@ -213,13 +216,19 @@ def create_text_representation(qdp_df: pd.DataFrame) -> pd.DataFrame:
 
     Args:
         qdp_df: DataFrame of question-distractor pairs.
+        template: Format string over {subject}, {construct}, {question},
+            {correct_answer}, {distractor}. Defaults to the canonical
+            QDP_TEXT_TEMPLATE, so existing behaviour is unchanged. Alternative
+            named variants live in config.QDP_TEXT_TEMPLATES and are used only
+            by the query-representation ablation. A template may reference a
+            subset of the fields; unreferenced fields are simply omitted.
 
     Returns:
         Same DataFrame with an added 'text' column.
     """
     qdp_df = qdp_df.copy()
     qdp_df["text"] = qdp_df.apply(
-        lambda row: QDP_TEXT_TEMPLATE.format(
+        lambda row: template.format(
             subject=row["SubjectName"],
             construct=row["ConstructName"],
             question=row["QuestionText"],

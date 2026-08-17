@@ -175,6 +175,98 @@ def materialise_exemplars(
     return out
 
 
+def _rows_to_exemplars(corpus_df: pd.DataFrame, positions: Sequence[int]) -> List[Dict]:
+    """Build exemplar records from corpus row positions (best-first)."""
+    out = []
+    for rank, pos in enumerate(positions, start=1):
+        row = corpus_df.iloc[int(pos)]
+        out.append({
+            "rank": rank,
+            "corpus_index": int(pos),
+            "question_id": int(row["QuestionId"]),
+            "subject": row["SubjectName"],
+            "construct": row["ConstructName"],
+            "question": row["QuestionText"],
+            "correct_answer": row["CorrectAnswerText"],
+            "distractor": row["DistractorText"],
+            "misconception_id": int(row["MisconceptionId"]),
+            "misconception_name": row["MisconceptionName"],
+        })
+    return out
+
+
+# Arms supported by select_context. G0/G1/G4/G5 need no retriever.
+ARMS = ("G0", "G1", "G2", "G3", "G4", "G5")
+ARM_DESCRIPTIONS = {
+    "G0": "Zero-shot (no exemplars)",
+    "G1": "Random exemplars from the whole corpus",
+    "G2": "Retrieved by the pretrained MiniLM baseline",
+    "G3": "Retrieved by the MNRL retriever (deployed system)",
+    "G4": "ORACLE — exemplars guaranteed to share a gold misconception",
+    "G5": "ANTI-ORACLE — same subject, guaranteed NOT to share a gold misconception",
+}
+
+
+def select_context(
+    arm: str,
+    target: Dict,
+    corpus_df: pd.DataFrame,
+    k: int,
+    rng: np.random.RandomState,
+    retrieved_indices: Optional[Sequence[int]] = None,
+) -> Tuple[List[Dict], bool]:
+    """
+    Select the k prompt exemplars for one target under a given arm.
+
+    The arm is the ONLY thing that varies across conditions: prompt template,
+    generator, decoding parameters, k, and evaluation set are all held fixed.
+
+    G4 (oracle) and G5 (anti-oracle) are diagnostics, not deployable systems —
+    they consult gold misconception labels to bound how much retrieval quality
+    could possibly contribute. G5 controls for topical relevance by drawing
+    from the same subject, so the G4/G5 contrast isolates misconception match
+    rather than topical similarity.
+
+    A question is 'constructible' for an arm only if the pool yields exactly k
+    exemplars. Arms are never padded or truncated to a different size, because
+    a varying k would confound the comparison; non-constructible questions are
+    excluded from that arm and reported.
+
+    Returns:
+        (exemplars, constructible)
+    """
+    if arm not in ARMS:
+        raise ValueError(f"arm must be one of {ARMS}, got {arm!r}")
+
+    qid = target["question_id"]
+    gold = {int(g["misconception_id"]) for g in target["gold_distractors"]}
+    not_self = (corpus_df["QuestionId"].values != qid)
+
+    if arm == "G0":
+        return [], True
+
+    if arm in ("G2", "G3"):
+        if retrieved_indices is None:
+            raise ValueError(f"arm {arm} requires retrieved_indices")
+        ex = materialise_exemplars(retrieved_indices, corpus_df, k=k,
+                                   exclude_question_id=qid)
+        return ex, len(ex) == k
+
+    misc = corpus_df["MisconceptionId"].values
+    if arm == "G1":
+        pool = np.flatnonzero(not_self)
+    elif arm == "G4":
+        pool = np.flatnonzero(not_self & np.isin(misc, list(gold)))
+    else:  # G5
+        same_subject = (corpus_df["SubjectName"].values == target["subject"])
+        pool = np.flatnonzero(not_self & same_subject & ~np.isin(misc, list(gold)))
+
+    if len(pool) < k:
+        return [], False
+    chosen = rng.choice(pool, size=k, replace=False)
+    return _rows_to_exemplars(corpus_df, chosen), True
+
+
 def annotate_exemplar_matches(exemplars: List[Dict], gold_misconception_ids: Sequence[int]) -> List[Dict]:
     """
     Flag which exemplars share a misconception with the target question.

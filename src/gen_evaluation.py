@@ -124,6 +124,64 @@ def add_semantic_metrics(
     return df
 
 
+def add_gated_quality(
+    df: pd.DataFrame,
+    records: List[Dict],
+    model_name: str = "all-MiniLM-L6-v2",
+) -> pd.DataFrame:
+    """
+    Validity-gated distractor quality — the metric intended as Stage 2 primary.
+
+    Motivation: raw embedding similarity discriminates good distractors from
+    random ones well (positive control AUC 0.908) but rates the CORRECT ANSWER
+    *higher* than a genuine distractor (0.754 vs 0.703, AUC 0.425). It measures
+    topical relatedness, not distractor validity, so it must not be used alone.
+
+    The gate zeroes any candidate that is invalid as a distractor — equal to
+    the correct answer, or empty — and otherwise scores it by its maximum
+    cosine similarity to any gold distractor.
+
+    Columns added:
+        gated_quality_max   best candidate. The direct analogue of exact match
+                            ("can the system produce at least one good
+                            distractor?") and the pre-specified primary.
+        gated_quality_mean  mean over candidates; penalises degenerate sets
+                            (duplicates, collisions), which exact match and
+                            raw similarity both ignore.
+    """
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer(model_name)
+
+    texts, spans = [], []
+    for r in records:
+        cand = [c.get("distractor", "") for c in r.get("candidates", [])]
+        gold = [g["distractor"] for g in r["gold_distractors"]]
+        spans.append((len(texts), len(cand), len(gold)))
+        texts.extend(cand + gold)
+    emb = _encode(texts, model)
+
+    q_max, q_mean = [], []
+    for r, (start, nc, ng) in zip(records, spans):
+        ce = emb[start:start + nc]
+        ge = emb[start + nc:start + nc + ng]
+        if nc == 0 or ng == 0:
+            q_max.append(0.0); q_mean.append(0.0); continue
+        sims = (ce @ ge.T).max(axis=1)          # best gold per candidate
+        correct = normalise_answer(r["correct_answer"])
+        scores = np.array([
+            0.0 if (not str(c.get("distractor", "")).strip()
+                    or normalise_answer(c["distractor"]) == correct) else s
+            for c, s in zip(r["candidates"], sims)
+        ])
+        q_max.append(float(scores.max()))
+        q_mean.append(float(scores.mean()))
+
+    df = df.copy()
+    df["gated_quality_max"] = q_max
+    df["gated_quality_mean"] = q_mean
+    return df
+
+
 def build_per_question_table(records_by_arm: Dict[str, List[Dict]]) -> pd.DataFrame:
     """Assemble the per-(arm, question) metric table."""
     rows = []

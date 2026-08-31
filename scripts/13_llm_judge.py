@@ -53,7 +53,7 @@ from src.utils import set_seed, print_section_header
 from src.retrieval_experiment import load_corpus_and_queries
 from src.generation import build_question_targets, ARM_DESCRIPTIONS
 from src.gen_evaluation import normalise_answer
-from src.llm_judge import LlamaJudge, judge_pair_both_orders
+from src.llm_judge import LlamaJudge, judge_pair_both_orders, score_pointwise
 
 GEN_DIR = OUTPUT_DIR / "generation" / "exp21"
 OUT_DIR = RESULTS_DIR / "llm_judge"
@@ -127,6 +127,121 @@ def summarise_validation(df: pd.DataFrame) -> pd.DataFrame:
             "tie": round(float((grp.outcome == "tie").mean()), 4),
             "unparsed": round(float((grp.outcome == "unparsed").mean()), 4),
             "p_vs_chance": f"{p:.3g}",
+        })
+    return pd.DataFrame(rows)
+
+
+# =============================================================================
+# STEP 1b — pointwise validation (position-bias-free)
+# =============================================================================
+
+AUC_BAR = 0.70
+
+
+def run_validation_pointwise(judge, targets, corpus_df, limit, seed) -> pd.DataFrame:
+    """
+    Score each known-quality item independently, so there is no A/B position
+    for the judge to latch onto.
+    """
+    rng = np.random.RandomState(seed)
+    corpus_distractors = corpus_df["DistractorText"].tolist()
+    usable = [t for t in targets if t["gold_distractors"]][:limit]
+
+    rows, t0 = [], time.time()
+    for i, t in enumerate(usable):
+        gold = str(t["gold_distractors"][0]["distractor"])
+        items = [
+            ("gold", gold),
+            ("random", str(corpus_distractors[rng.randint(len(corpus_distractors))])),
+            ("correct_answer", str(t["correct_answer"])),
+            ("perturbed_gold", perturb(gold)),
+        ]
+        for kind, cand in items:
+            res = score_pointwise(judge, t, cand)
+            rows.append({"kind": kind, "question_id": t["question_id"],
+                         "candidate": cand, **res})
+        if (i + 1) % 5 == 0 or i == len(usable) - 1:
+            el = time.time() - t0
+            print(f"    {i+1}/{len(usable)} questions  {el/(i+1):.1f}s/q  "
+                  f"elapsed {el/60:.1f} min")
+    return pd.DataFrame(rows)
+
+
+def _auc(good: np.ndarray, bad: np.ndarray):
+    """AUC with ties handled (Mann-Whitney U / n1n2)."""
+    if len(good) == 0 or len(bad) == 0:
+        return float("nan"), 1.0
+    u, p = stats.mannwhitneyu(good, bad, alternative="two-sided")
+    return float(u / (len(good) * len(bad))), float(p)
+
+
+def summarise_validation_pointwise(df: pd.DataFrame) -> pd.DataFrame:
+    """Discrimination of the pointwise scores on each known-quality contrast."""
+    piv = df.dropna(subset=["score"])
+    good = piv[piv.kind == "gold"]["score"].values
+    rows = []
+    for bad_kind, label in [("random", "C1 gold vs random"),
+                            ("correct_answer", "C2 gold vs correct answer"),
+                            ("perturbed_gold", "C3 gold vs perturbed (probe)")]:
+        bad = piv[piv.kind == bad_kind]["score"].values
+        auc, p = _auc(good, bad)
+        rows.append({
+            "comparison": label,
+            "gold_mean_score": round(float(good.mean()), 3) if len(good) else np.nan,
+            "other_mean_score": round(float(bad.mean()), 3) if len(bad) else np.nan,
+            "AUC": round(auc, 4), "p_value": f"{p:.3g}",
+            "n_good": len(good), "n_other": len(bad),
+        })
+    return pd.DataFrame(rows)
+
+
+def run_experiment_pointwise(judge, arms, limit) -> pd.DataFrame:
+    """Score one representative candidate per arm per question."""
+    rows = []
+    common = None
+    for a in arms:
+        common = set(arms[a]) if common is None else common & set(arms[a])
+    qs = sorted(common)[:limit]
+    print(f"  scoring {len(qs)} questions x {len(arms)} arms "
+          f"(+ gold anchor) = {len(qs)*(len(arms)+1)} calls")
+    t0 = time.time()
+    for i, qid in enumerate(qs):
+        any_rec = arms[list(arms)[0]][qid]
+        for arm in arms:
+            cand = best_candidate(arms[arm][qid])
+            if not cand:
+                continue
+            res = score_pointwise(judge, arms[arm][qid], cand)
+            rows.append({"arm": arm, "question_id": qid, "candidate": cand, **res})
+        gold = str(any_rec["gold_distractors"][0]["distractor"])
+        res = score_pointwise(judge, any_rec, gold)
+        rows.append({"arm": "GOLD", "question_id": qid, "candidate": gold, **res})
+        if (i + 1) % 10 == 0 or i == len(qs) - 1:
+            el = time.time() - t0
+            print(f"    {i+1}/{len(qs)}  {el/(i+1):.1f}s/q  {el/60:.1f} min")
+    return pd.DataFrame(rows)
+
+
+def summarise_experiment_pointwise(df: pd.DataFrame) -> pd.DataFrame:
+    """Paired Wilcoxon of each arm against GOLD and against G5."""
+    piv = df.dropna(subset=["score"]).pivot_table(
+        index="question_id", columns="arm", values="score", aggfunc="first")
+    rows = []
+    for a, b in [("G5", "G4"), ("G1", "G4"), ("GOLD", "G4"), ("GOLD", "G1")]:
+        if a not in piv.columns or b not in piv.columns:
+            continue
+        sub = piv[[a, b]].dropna()
+        if len(sub) < 5:
+            continue
+        va, vb = sub[a].values, sub[b].values
+        p = 1.0 if np.allclose(vb, va) else float(stats.wilcoxon(vb, va).pvalue)
+        rows.append({
+            "comparison": f"{b} vs {a}", "n_paired": len(sub),
+            "reference_mean": round(float(va.mean()), 3),
+            "treatment_mean": round(float(vb.mean()), 3),
+            "delta": round(float((vb - va).mean()), 3),
+            "p_value": f"{p:.4g}",
+            "significant_0.05": "yes" if p < 0.05 else "no",
         })
     return pd.DataFrame(rows)
 
@@ -219,10 +334,17 @@ def main() -> None:
     ap.add_argument("--no-4bit", action="store_true")
     ap.add_argument("--force", action="store_true",
                     help="Score the experiment even if the gate fails (NOT recommended)")
+    ap.add_argument("--mode", choices=["pairwise", "pointwise"], default="pairwise",
+                    help="pointwise scores each distractor alone, making position "
+                         "bias structurally impossible (use when pairwise fails "
+                         "the order-consistency check)")
     args = ap.parse_args()
 
     set_seed(args.seed)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    if args.mode == "pointwise":
+        return main_pointwise(args)
 
     print_section_header("LLM-AS-JUDGE — positive-control gate")
     print(f"  Judge: {args.judge_model}")
@@ -290,6 +412,142 @@ def main() -> None:
 
     write_report(vsum, esum, c1, c2, c3, inc, passed)
     print("\n  ✅ LLM-judge evaluation complete.")
+
+
+def main_pointwise(args) -> None:
+    """
+    Pointwise mode: score each distractor alone.
+
+    Used when pairwise judging fails the order-consistency check. There is no
+    A/B layout, so position bias cannot occur; the risk instead is scale
+    compression, which the same positive-control battery detects as low AUC.
+    """
+    print_section_header("LLM-AS-JUDGE (POINTWISE) — positive-control gate")
+    print(f"  Judge: {args.judge_model}")
+    print("  Scoring each distractor alone -> position bias is structurally impossible.")
+    print(f"  Bar: AUC >= {AUC_BAR} on BOTH C1 (gold vs random) and "
+          f"C2 (gold vs correct answer).")
+
+    corpus_df, test_qdp, _ = load_corpus_and_queries("test")
+    targets = build_question_targets(test_qdp)
+    judge = LlamaJudge(model_name=args.judge_model,
+                       load_in_4bit=not args.no_4bit, seed=args.seed)
+
+    print_section_header("STEP 1 — validation (pointwise)")
+    val = run_validation_pointwise(judge, targets, corpus_df, args.limit, args.seed)
+    val.to_csv(OUT_DIR / "judge_pointwise_validation_raw.csv", index=False)
+    unparsed = float(val["score"].isna().mean())
+    vsum = summarise_validation_pointwise(val)
+    print()
+    print(vsum.to_string(index=False))
+    print(f"\n  score distribution: "
+          f"{val['score'].value_counts().sort_index().to_dict()}")
+    print(f"  unparsed: {unparsed:.1%}")
+    vsum.to_csv(OUT_DIR / "judge_pointwise_validation_summary.csv", index=False)
+
+    def auc_of(label):
+        r = vsum[vsum.comparison.str.startswith(label)]
+        return float(r["AUC"].iloc[0]) if len(r) else 0.0
+    a1, a2, a3 = auc_of("C1"), auc_of("C2"), auc_of("C3")
+
+    passed = (a1 >= AUC_BAR) and (a2 >= AUC_BAR)
+    print_section_header("GATE")
+    print(f"  C1 gold vs random        AUC {a1:.3f}  (bar {AUC_BAR})")
+    print(f"  C2 gold vs correct       AUC {a2:.3f}  (bar {AUC_BAR})")
+    print(f"  C3 gold vs perturbed     AUC {a3:.3f}  (probe; automatic metrics ~0.56)")
+    print(f"\n  VERDICT: {'PASS' if passed else 'FAIL'}")
+
+    esum = None
+    if not passed and not args.force:
+        print("\n  ❌ Pointwise judge also failed its positive control.")
+        print("     Scores do not separate known-good from known-bad distractors.")
+        print("     Report the failure; do not score the experiment.")
+    elif args.validate_only:
+        print("\n  Validation-only run complete.")
+    else:
+        print_section_header("STEP 2 — experiment (pointwise)")
+        arms = load_arms()
+        for a in arms:
+            print(f"  {a}: {len(arms[a])} questions")
+        exp = run_experiment_pointwise(judge, arms, args.exp_limit)
+        if len(exp):
+            exp.to_csv(OUT_DIR / "judge_pointwise_experiment_raw.csv", index=False)
+            esum = summarise_experiment_pointwise(exp)
+            print()
+            print(esum.to_string(index=False))
+            esum.to_csv(OUT_DIR / "judge_pointwise_experiment_summary.csv", index=False)
+
+    write_report_pointwise(vsum, esum, a1, a2, a3, unparsed, passed)
+    if not passed and not args.force:
+        sys.exit(2)
+    print("\n  ✅ Pointwise judge run complete.")
+
+
+def write_report_pointwise(vsum, esum, a1, a2, a3, unparsed, passed) -> None:
+    def md(f, index=False):
+        if f is None:
+            return "_not run_"
+        try:
+            return f.to_markdown(index=index)
+        except ImportError:
+            return "```\n" + f.to_string(index=index) + "\n```"
+
+    probe = (f"On C3 (gold vs digit-perturbed gold) AUC = {a3:.3f}. "
+             + ("This clears the blind spot that defeats every automatic metric "
+                "(AUC ~0.56)." if a3 >= AUC_BAR else
+                "This does not clear the automatic-metric blind spot (~0.56), so "
+                "'right misconception, wrong arithmetic' remains undetectable."))
+
+    verdict = "_experiment not scored_"
+    if esum is not None and len(esum):
+        parts = []
+        g = esum[esum.comparison == "G4 vs GOLD"]
+        if len(g):
+            r = g.iloc[0]
+            parts.append(f"Oracle-context distractors score {r['treatment_mean']} "
+                         f"vs {r['reference_mean']} for teacher-written gold "
+                         f"(delta {r['delta']}, p={r['p_value']}).")
+        m = esum[esum.comparison == "G4 vs G5"]
+        if len(m):
+            r = m.iloc[0]
+            sig = float(r["p_value"]) < 0.05
+            parts.append(
+                f"Oracle vs anti-oracle: {r['delta']:+} points (p={r['p_value']}), "
+                + ("**significant** — misconception-matched context yields "
+                   "distractors a validated judge rates higher."
+                   if sig else
+                   "**not significant**, converging with the validated automatic "
+                   "metric (+0.015, p=0.088) that the effect is small."))
+        verdict = " ".join(parts)
+
+    lines = [
+        "# LLM-as-Judge Evaluation — Pointwise", "",
+        "Pairwise judging was attempted first and **failed its positive control**: "
+        "Mistral-7B answered \"A\" in ~92% of trials regardless of content "
+        "(order-inconsistency 0.80 against a 0.30 bar), while being 100% correct "
+        "on every control whenever it did commit to a content-based verdict. The "
+        "discriminative ability was present; the two-option layout defeated it.",
+        "",
+        "Pointwise scoring rates each distractor alone, so position bias is "
+        "structurally impossible. The risk becomes scale compression instead, "
+        "which the same known-quality battery detects as low AUC.", "",
+        "## Step 1 — validation", "", md(vsum), "",
+        f"**Gate: {'PASS' if passed else 'FAIL'}** — C1 AUC {a1:.3f}, C2 AUC {a2:.3f} "
+        f"(bar {AUC_BAR}). Unparsed responses: {unparsed:.1%}.", "", probe, "",
+        "## Step 2 — experiment", "", md(esum), "",
+        "## Verdict", "", verdict, "",
+        "## Caveats", "",
+        "- Pointwise scores are on an absolute 1-5 scale and may drift between "
+        "calls; only within-question paired comparisons are reported.",
+        "- The judge is an imperfect proxy for teachers; validation establishes "
+        "only that it separates known-good from known-bad distractors here.",
+        "- One representative candidate per arm per question is scored, so "
+        "results reflect typical rather than best-of-M quality.",
+        "", "---", "*Auto-generated by scripts/13_llm_judge.py --mode pointwise.*",
+    ]
+    p = OUT_DIR / "llm_judge_pointwise_report.md"
+    p.write_text("\n".join(lines))
+    print(f"  [Saved] {p}")
 
 
 def write_report(vsum, esum, c1, c2, c3, inc, passed) -> None:

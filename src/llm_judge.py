@@ -67,8 +67,89 @@ Think briefly, then answer. Respond with JSON only:
 {{"reasoning": "<one sentence>", "verdict": "A" | "B" | "TIE"}}"""
 
 
+# --- Pointwise scoring (position-bias-free alternative to pairwise) ---------
+#
+# Mistral-7B judged pairwise with ~92% "A" responses regardless of content
+# (order-inconsistency 0.80), yet was 100% correct on every control whenever
+# it did commit to a content-based verdict. The discriminative ability is
+# there; the two-option layout defeats it. Scoring one option at a time makes
+# position bias structurally impossible.
+#
+# The trade-off is scale compression (a judge that rates everything 4/5), so
+# the same positive-control battery is applied and discrimination is measured
+# as AUC rather than assumed.
+
+POINTWISE_SYSTEM = (
+    "You are an experienced mathematics teacher evaluating a proposed "
+    "distractor (an incorrect answer option) for a multiple-choice question. "
+    "A good distractor is one a real student would plausibly choose because "
+    "it follows from a specific, common misconception. A poor distractor is "
+    "irrelevant, obviously wrong to any student, or is actually the correct "
+    "answer. Score strictly and use the full range."
+)
+
+POINTWISE_USER = """Question
+Subject: {subject} | Construct: {construct}
+{question}
+
+Correct answer: {correct_answer}
+
+Proposed distractor: {candidate}
+
+Score this distractor from 1 to 5:
+5 = excellent - a student would very likely choose it; follows from a clear, specific misconception
+4 = good - plausible and traceable to a likely error
+3 = mediocre - possible but weakly motivated
+2 = poor - a student is unlikely to choose it
+1 = unusable - irrelevant, nonsensical, or it IS the correct answer
+
+Respond with JSON only:
+{{"reasoning": "<one short sentence>", "score": <1-5>}}"""
+
 _JSON_OBJ = re.compile(r"\{.*\}", re.DOTALL)
 _VERDICT = re.compile(r'"verdict"\s*:\s*"?(A|B|TIE)"?', re.IGNORECASE)
+_SCORE = re.compile(r'"score"\s*:\s*"?([1-5])"?')
+
+
+def parse_score(raw: str):
+    """
+    Extract a 1-5 score. Returns (score, status) with status in
+    {'json', 'regex', 'failed'}; unparseable responses are dropped, never
+    guessed.
+    """
+    text = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+    m = _JSON_OBJ.search(text)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            v = int(float(obj["score"]))
+            if 1 <= v <= 5:
+                return v, "json"
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            pass
+    m = _SCORE.search(text)
+    if m:
+        return int(m.group(1)), "regex"
+    return None, "failed"
+
+
+def build_pointwise_prompt(question: Dict, candidate: str) -> Tuple[str, str]:
+    """Assemble the pointwise scoring prompt for a single distractor."""
+    return POINTWISE_SYSTEM, POINTWISE_USER.format(
+        subject=question["subject"],
+        construct=question["construct"],
+        question=question["question_text"],
+        correct_answer=question["correct_answer"],
+        candidate=candidate,
+    )
+
+
+def score_pointwise(judge, question: Dict, candidate: str) -> Dict:
+    """Score one distractor independently. No position, hence no position bias."""
+    s, u = build_pointwise_prompt(question, candidate)
+    raw = judge.judge(s, u)
+    score, status = parse_score(raw)
+    return {"score": score, "parse_status": status}
 
 
 def parse_verdict(raw: str) -> Tuple[Optional[str], str]:

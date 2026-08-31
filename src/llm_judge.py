@@ -149,13 +149,35 @@ class LlamaJudge:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
         self.model.eval()
+
+        # Some chat templates (notably Mistral-Instruct) do not support a
+        # 'system' role and will raise or silently drop it. A dropped system
+        # message leaves the judge with no instructions, which shows up as
+        # severe A/B position bias rather than as an error. Detect it once
+        # and fold the system text into the user turn when unsupported.
+        self.supports_system = self._probe_system_role()
+        print(f"  system role supported: {self.supports_system}"
+              + ("" if self.supports_system else "  -> folding into user turn"))
         print("  Judge ready.")
+
+    def _probe_system_role(self) -> bool:
+        probe = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
+        try:
+            out = self.tokenizer.apply_chat_template(
+                probe, tokenize=False, add_generation_prompt=True)
+        except Exception:
+            return False
+        return "S" in out            # False if the template silently dropped it
 
     def judge(self, system_prompt: str, user_prompt: str) -> str:
         from transformers import set_seed
         set_seed(self.seed)
-        messages = [{"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}]
+        if self.supports_system:
+            messages = [{"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}]
+        else:
+            messages = [{"role": "user",
+                         "content": f"{system_prompt}\n\n{user_prompt}"}]
         text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True)
         inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)

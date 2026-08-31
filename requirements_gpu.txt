@@ -22,4 +22,6 @@ tabulate
 # clarity; bitsandbytes provides the 4-bit kernels needed to fit a 7B model
 # on a 16 GB T4.
 transformers>=4.44
-bitsandbytes
+# >=0.46.1 is required by recent transformers for 4-bit loading; an older or
+# missing install fails only at model-load time with an ImportError.
+bitsandbytes>=0.46.1
